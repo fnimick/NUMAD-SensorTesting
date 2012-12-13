@@ -21,7 +21,6 @@ public class DowntimeNotificationManager {
 				.setContentTitle("SensorTesting collecting")
 				.setContentText("Click to go to Downtime")
 				.setSmallIcon(R.drawable.a_justice)
-				.setVibrate(new long[] { 0L, 100 })
 				.setContentIntent(notifyIntent).build();
 		noti.flags |= Notification.FLAG_ONGOING_EVENT;
 		return noti;

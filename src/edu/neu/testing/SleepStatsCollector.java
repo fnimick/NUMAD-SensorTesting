@@ -23,27 +23,36 @@ import android.os.IBinder;
 import android.util.Log;
 
 public class SleepStatsCollector extends Service implements SensorEventListener {
-	public static final float ACTIVITY_LEVEL_DIVISION_RATIO = 5.0f;
+	public static final float ACTIVITY_LEVEL_DIVISION_RATIO = 1.0f;
 	/**
 	 * Interval length in milliseconds
 	 */
 	public static final int INTERVAL_LENGTH_SECS = 60;
 	public static final int INTERVAL_LENGTH = INTERVAL_LENGTH_SECS * 1000;
-	
+
 	public static final String SAVE_DATA_BOOL = "saveData";
 
 	private final IBinder mBinder = new SleepBinder();
 	private SensorManager mSensorManager;
 	private Sensor mAccel;
-	private long x;
-	private float[] y;
+	private long currentTime;
+	private float[] currentAccel;
 	private double[][] oldepoch;
-	private double[][] epoch = new double[INTERVAL_LENGTH_SECS*10][3];
+	private double[][] epoch = new double[INTERVAL_LENGTH_SECS * 10][3];
 	private List<Epoch> epochList = new ArrayList<Epoch>();
 	private int i = 0;
 	private Long start;
 	private Long end;
 	private boolean isListenerRegistered = false;
+
+	// Adaptive filter
+	public static final float FILTER_CONSTANT = 0.9174f;
+	public static final float K_ACCELEROMETER_MIN_STEP = 0.033f;
+	public static final float K_ACCELEROMETER_NOISE_ATTENUATION = 3f;
+	float alpha = FILTER_CONSTANT;
+	float tempFloat, accelX, accelY, accelZ;
+	float lastAccel[] = new float[3];
+	float accelFilter[] = new float[3];
 
 	@Override
 	public void onCreate() {
@@ -58,7 +67,8 @@ public class SleepStatsCollector extends Service implements SensorEventListener 
 	@Override
 	public void onStart(Intent intent, int startId) {
 		registerListener();
-		startForeground(42, DowntimeNotificationManager.createSetNotification(this));
+		startForeground(42,
+				DowntimeNotificationManager.createSetNotification(this));
 	}
 
 	@Override
@@ -66,7 +76,8 @@ public class SleepStatsCollector extends Service implements SensorEventListener 
 		registerListener();
 		// We want this service to continue running until it is explicitly
 		// stopped, so return sticky.
-		startForeground(42, DowntimeNotificationManager.createSetNotification(this));
+		startForeground(42,
+				DowntimeNotificationManager.createSetNotification(this));
 		if (intent.getBooleanExtra(SAVE_DATA_BOOL, false)) {
 			DatabaseAdapter db = DatabaseAdapter.getInstance(this);
 			db.open();
@@ -76,7 +87,7 @@ public class SleepStatsCollector extends Service implements SensorEventListener 
 		}
 		return START_STICKY;
 	}
-	
+
 	@Override
 	public IBinder onBind(Intent intent) {
 		registerListener();
@@ -108,25 +119,21 @@ public class SleepStatsCollector extends Service implements SensorEventListener 
 	 * Fetch x value
 	 */
 	double getHour() {
-		return millToHour(x);
+		return millToHour(currentTime);
 	}
 
 	/**
 	 * Fetch y value
 	 */
 	double getData() {
-		return Math.abs(y[0]) + Math.abs(y[1]) + Math.abs(y[2]) - 9.81;
+		return Math.abs(currentAccel[0]) + Math.abs(currentAccel[1])
+				+ Math.abs(currentAccel[2]) - 9.81;
 	}
 
 	/**
 	 * Process the data provided by the sensor
 	 */
-	void processData(final long timestamp, float[] values) {
-		float x, y, z;
-		x = values[0];
-		y = values[1];
-		z = values[2];
-
+	void processData(final long timestamp, float x, float y, float z) {
 		if (start == null) {
 			start = timestamp;
 			end = timestamp + INTERVAL_LENGTH;
@@ -142,11 +149,11 @@ public class SleepStatsCollector extends Service implements SensorEventListener 
 				}
 			});
 			// Clear the array
-			epoch = new double[INTERVAL_LENGTH_SECS*10][3];
-			start = null; //TODO: add epoch for current values
+			epoch = new double[INTERVAL_LENGTH_SECS * 10][3];
+			start = null; // TODO: add epoch for current values
 			i = 0;
 		} else {
-			if (i < INTERVAL_LENGTH_SECS*10-1) {
+			if (i < INTERVAL_LENGTH_SECS * 10 - 1) {
 				epoch[i++] = new double[] { x, y, z };
 			}
 		}
@@ -176,11 +183,45 @@ public class SleepStatsCollector extends Service implements SensorEventListener 
 		// Don't care if accuracy changes
 	}
 
+	public static float norm(float x, float y, float z) {
+		return (float) Math.sqrt(x * x + y * y + z * z);
+	}
+
+	public static float clamp(float v, float min, float max) {
+		if (v > max)
+			return max;
+		if (v < min)
+			return min;
+		return v;
+	}
+	
+	// Implements a high-pass filter
 	public void onSensorChanged(SensorEvent event) {
-		// Process sensor event
-		x = System.currentTimeMillis();
-		y = event.values;
-		processData(x, event.values);
+		accelX = event.values[0];
+		accelY = event.values[1];
+		accelZ = event.values[2];
+
+		tempFloat = clamp(
+				Math.abs(norm(accelFilter[0], accelFilter[1], accelFilter[2])
+						- norm(accelX, accelY, accelZ))
+						/ K_ACCELEROMETER_MIN_STEP - 1.0f, 0.0f, 1.0f);
+		alpha = tempFloat * FILTER_CONSTANT / K_ACCELEROMETER_NOISE_ATTENUATION
+				+ (1.0f - tempFloat) * FILTER_CONSTANT;
+		
+		accelFilter[0] = (float) (alpha * (accelFilter[0] + accelX - lastAccel[0]));
+	    accelFilter[1] = (float) (alpha * (accelFilter[1] + accelY - lastAccel[1]));
+	    accelFilter[2] = (float) (alpha * (accelFilter[2] + accelZ - lastAccel[2]));
+	    
+	    lastAccel[0] = accelX;
+	    lastAccel[1] = accelY;
+	    lastAccel[2] = accelZ;
+	    onFilteredAccelerometerChanged(accelFilter[0], accelFilter[1], accelFilter[2]);
+	}
+
+	public void onFilteredAccelerometerChanged(float x, float y, float z) {
+		currentTime = System.currentTimeMillis();
+		currentAccel = new float[] { x, y, z };
+		processData(currentTime, x, y, z);
 	}
 
 	public double millToHour(long time) {
